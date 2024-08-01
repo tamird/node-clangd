@@ -107,7 +107,7 @@ function test(
               try {
                 await body(assert, ui);
               } catch (e) {
-                assert.fail(e);
+                assert.fail(e as string);
               }
               console.log('Fake github stopping...');
               server.close();

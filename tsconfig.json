@@ -16,7 +16,7 @@
     "declaration": true,
     "rootDir": ".",
     "alwaysStrict": true,
-    "strict": false,
+    "strict": true,
     "noEmitOnError": true,
     "noFallthroughCasesInSwitch": true,
     "noImplicitAny": true,
