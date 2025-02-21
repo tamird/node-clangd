@@ -8,6 +8,7 @@
 //  - checking for updates (manual or automatic)
 //  - no usable clangd found, try to recover
 // These have different flows, but the same underlying mechanisms.
+import yauzl from 'yauzl';
 import * as child_process from 'child_process';
 import * as fs from 'fs';
 import fetch from 'node-fetch';
@@ -17,7 +18,7 @@ import {readdirpPromise} from 'readdirp';
 import {rimraf} from 'rimraf';
 import * as semver from 'semver';
 import * as stream from 'stream';
-import * as unzipper from 'unzipper';
+import {promisify} from 'util';
 import which from 'which';
 
 // Abstracts the editor UI and configuration.
@@ -314,20 +315,71 @@ namespace Install {
         // continue with installation.
       }
     }
+
     const zipFile = path.join(dirs.download, asset.name);
     await download(asset.browser_download_url, zipFile, abort, ui);
-    const archive = await unzipper.Open.file(zipFile);
-    const executable = archive.files.find(
-      (file) => path.basename(file.path) == clangdFilename,
+
+    // Can't use promisify(yauzl.open) because yauzl.open is overloaded and we
+    // want the second overload.
+    const open = promisify(
+      (
+        file: string,
+        callback: (err: Error | null, zipfile: yauzl.ZipFile) => void,
+      ) => yauzl.open(file, {lazyEntries: true}, callback),
     );
-    if (executable === undefined) {
-      throw new Error(`Didn't find ${clangdFilename} in ${zipFile}`);
-    }
+
+    const clangdPath = await open(zipFile).then((zip) =>
+      new Promise<string>((resolve, reject) => {
+        zip.on('entry', (entry: yauzl.Entry) => {
+          if (path.basename(entry.fileName) === clangdFilename) {
+            return resolve(path.join(extractRoot, entry.fileName));
+          }
+          zip.readEntry();
+        });
+
+        zip.on('error', reject);
+
+        zip.on('end', () => {
+          reject(new Error(`Didn't find ${clangdFilename} in ${zipFile}`));
+        });
+
+        // Start reading.
+        zip.readEntry();
+      }).finally(() => zip.close()),
+    );
+
+    await fs.promises.mkdir(extractRoot);
+
     await ui.slow(
       ui.localize('Extracting {0}', asset.name),
-      archive.extract({path: extractRoot}),
+      open(zipFile).then((zip) =>
+        new Promise<void>((resolve, reject) => {
+          zip.on('entry', (entry: yauzl.Entry) => {
+            const entryPath = path.join(extractRoot, entry.fileName);
+
+            (entry.fileName.endsWith('/')
+              ? fs.promises.mkdir(entryPath)
+              : promisify(zip.openReadStream.bind(zip))(entry).then(
+                  (readStream) =>
+                    stream.promises.pipeline(
+                      readStream,
+                      fs.createWriteStream(entryPath),
+                    ),
+                )
+            )
+              .then(() => zip.readEntry())
+              .catch(reject);
+          });
+
+          zip.on('error', reject);
+
+          zip.on('end', resolve);
+
+          // Start reading.
+          zip.readEntry();
+        }).finally(() => zip.close()),
+      ),
     );
-    const clangdPath = path.join(extractRoot, executable.path);
     await fs.promises.chmod(clangdPath, 0o755);
     await fs.promises.unlink(zipFile);
     return clangdPath;
